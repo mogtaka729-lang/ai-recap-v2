@@ -14,6 +14,14 @@ UPLOAD_FOLDER = '/tmp/recap_files'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
+# အချိန်ကိုက် SRT အတွက် အချိန်ပြောင်းပေးသည့်စနစ်
+def format_time(seconds):
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds - int(seconds)) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
 @app.route('/')
 def home():
     return "AI Recap Server V2 is Active!"
@@ -47,33 +55,42 @@ def process_video():
             video_clip.audio.write_audiofile(audio_filepath, logger=None)
             video_clip.close()
         except Exception as e:
-            return jsonify({"error": f"Audio extraction failed: {str(e)}"}), 500
+            return jsonify({"error": f"Audio extraction failed: No sound detected or video issue."}), 500
 
+        # ၁။ Groq ဖြင့် စာသားထုတ်ခြင်း (JSON ပုံစံဖြင့် တောင်းခံ၍ Error ရှောင်ခြင်း)
         headers_audio = {"Authorization": f"Bearer {api_key}"}
         with open(audio_filepath, 'rb') as f:
             files = {'file': ("audio.mp3", f, 'audio/mpeg')}
-            data = {'model': 'whisper-large-v3', 'response_format': 'srt'}
+            data = {'model': 'whisper-large-v3', 'response_format': 'verbose_json'}
             res_srt = requests.post("https://api.groq.com/openai/v1/audio/transcriptions", headers=headers_audio, files=files, data=data)
         
+        # Groq က ငြင်းခဲ့လျှင် အကြောင်းရင်းအမှန်ကို ဖော်ပြပေးရန်
         if res_srt.status_code != 200:
-            return jsonify({"error": "Failed to transcribe audio for SRT."}), 500
+            err_msg = res_srt.json().get('error', {}).get('message', 'Unknown Groq Error')
+            return jsonify({"error": f"Groq AI Error: {err_msg}"}), 500
+            
+        resp_data = res_srt.json()
+        transcript_text = resp_data.get('text', '')
         
-        original_srt = res_srt.text
-        with open(srt_filepath, 'w', encoding='utf-8') as f:
-            f.write(original_srt)
+        # ၂။ သေသပ်သော SRT အဖြစ် ပြောင်းလဲခြင်း
+        srt_content = ""
+        segments = resp_data.get('segments', [])
+        for i, seg in enumerate(segments):
+            start = format_time(seg['start'])
+            end = format_time(seg['end'])
+            text = seg['text'].strip()
+            srt_content += f"{i+1}\n{start} --> {end}\n{text}\n\n"
 
-        with open(audio_filepath, 'rb') as f:
-            files = {'file': ("audio.mp3", f, 'audio/mpeg')}
-            data = {'model': 'whisper-large-v3', 'response_format': 'text'}
-            res_txt = requests.post("https://api.groq.com/openai/v1/audio/transcriptions", headers=headers_audio, files=files, data=data)
-        
-        transcript_text = res_txt.text
+        with open(srt_filepath, 'w', encoding='utf-8') as f:
+            f.write(srt_content)
+
         final_transcript = transcript_text
 
+        # ၃။ ဘာသာပြန်ခြင်း
         if language != "English":
             chat_url = "https://api.groq.com/openai/v1/chat/completions"
             headers_chat = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            prompt = f"Translate the following text to natural {language}. Return ONLY the translated text:\n\n{transcript_text}"
+            prompt = f"Translate the following text to natural {language}. Return ONLY the translated text without timestamps:\n\n{transcript_text}"
             chat_payload = {
                 "model": "llama-3.1-8b-instant",
                 "messages": [
@@ -83,12 +100,17 @@ def process_video():
                 "temperature": 0.3
             }
             chat_res = requests.post(chat_url, headers=headers_chat, json=chat_payload)
+            
             if chat_res.status_code == 200:
                 final_transcript = chat_res.json()['choices'][0]['message']['content']
+            else:
+                err_msg = chat_res.json().get('error', {}).get('message', 'Translation Failed')
+                return jsonify({"error": f"Groq Translate Error: {err_msg}"}), 500
 
         with open(txt_filepath, 'w', encoding='utf-8') as f:
             f.write(final_transcript)
 
+        # ၄။ Text-to-Speech အသံပြောင်းခြင်း
         lang_code = 'my' if language == 'Myanmar' else 'en'
         tts = gTTS(text=final_transcript, lang=lang_code)
         tts.save(voice_filepath)
@@ -102,7 +124,7 @@ def process_video():
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Server Error: {str(e)}"}), 500
     finally:
         if filepath and os.path.exists(filepath):
             os.remove(filepath)
