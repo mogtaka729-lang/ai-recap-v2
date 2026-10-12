@@ -7,7 +7,6 @@ import subprocess
 import imageio_ffmpeg
 import base64
 import re
-import json
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
@@ -18,13 +17,51 @@ UPLOAD_FOLDER = '/tmp/recap_files'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-async def generate_edge_audio(text, voice_model, output_path):
-    communicate = edge_tts.Communicate(text, voice_model, rate="+0%")
-    await communicate.save(output_path)
+async def generate_edge_audio_with_proxy(text, voice_model, output_path):
+    """Render ၏ IP 403 ကို ကျော်ဖြတ်ရန် Proxy စနစ်ဖြင့် နီလာ/သီဟ အသံ ထုတ်ယူခြင်း"""
+    # ၁။ တိုက်ရိုက်အရင် စမ်းသပ်ခြင်း
+    try:
+        communicate = edge_tts.Communicate(text, voice_model)
+        await asyncio.wait_for(communicate.save(output_path), timeout=15)
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            return True
+    except Exception:
+        pass
+
+    # ၂။ 403 တက်ပါက အခမဲ့ Elite HTTPS Proxy စာရင်း ရယူခြင်း
+    proxies = []
+    proxy_apis = [
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=4000&country=all&ssl=yes&anonymity=elite",
+        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"
+    ]
+    
+    for api_url in proxy_apis:
+        try:
+            r = requests.get(api_url, timeout=4)
+            if r.status_code == 200:
+                lines = [l.strip() for l in r.text.splitlines() if l.strip() and ":" in l]
+                proxies.extend(lines[:12])
+                if proxies:
+                    break
+        except Exception:
+            continue
+
+    # ၃။ Proxy များဖြင့် အလှည့်ကျ စမ်းသပ် ထုတ်ယူခြင်း
+    for p in proxies:
+        try:
+            proxy_url = f"http://{p}"
+            communicate = edge_tts.Communicate(text, voice_model, proxy=proxy_url)
+            await asyncio.wait_for(communicate.save(output_path), timeout=12)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                return True
+        except Exception:
+            continue
+
+    raise Exception("Proxy ချိတ်ဆက်မှု မအောင်မြင်ပါ။ စက္ကန့်အနည်းငယ်အကြာတွင် Try Again ပြန်နှိပ်ပေးပါ။")
 
 @app.route('/')
 def home():
-    return "AI Movie Recap Server (Final Stable Nilar/Thiha) is Active!"
+    return "AI Movie Recap Server (Proxy Bypass Edition) is Active!"
 
 @app.route('/step1_process', methods=['POST'])
 def step1_process():
@@ -44,9 +81,9 @@ def step1_process():
         
         video_file.save(filepath)
 
-        # FFMPEG ဖြင့် အသံဆွဲထုတ်ခြင်း
+        # အသံကို ကြည်လင်ပြတ်သားစေရန် 16kHz Mono သီးသန့်ဆွဲထုတ်ခြင်း (စာလုံးထပ်ခြင်းကို ကာကွယ်သည်)
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        subprocess.run([ffmpeg_exe, '-i', filepath, '-vn', '-b:a', '64k', audio_filepath, '-y'], 
+        subprocess.run([ffmpeg_exe, '-i', filepath, '-vn', '-ac', '1', '-ar', '16000', '-b:a', '128k', audio_filepath, '-y'], 
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
         with open(audio_filepath, "rb") as f:
@@ -57,14 +94,14 @@ def step1_process():
             "gemini-3.8-flash"
         ]
 
-        # Movie Recap အတွက် ဇာတ်လမ်းပြောစာသားနှင့် SRT ကို တိကျစွာ ခွဲထုတ်ခိုင်းခြင်း
         prompt = (
-            f"You are a professional Movie Recap creator. Listen to the speech and sound in this audio. "
-            f"Create a natural, engaging {lang} (မြန်မာစကားပြော) movie recap narration and timestamped SRT subtitles.\n"
-            f"Output MUST be a single valid JSON object with EXACTLY two fields:\n"
-            f"1. 'script': Clean, storytelling Myanmar movie recap narration text for voiceover. Do NOT repeat senseless phrases like 'ဟုတ်တယ်မလား'. Make it sound like a captivating story narrator.\n"
-            f"2. 'srt': Standard SRT subtitles with sequence numbers and timestamps (00:00:00,000 --> 00:00:03,000).\n"
-            f"Output ONLY raw JSON format without markdown backticks."
+            f"You are a professional video translator and recap narrator. "
+            f"Listen to the dialogue in this audio carefully. Translate and narrate the content in natural, fluent {lang} (မြန်မာစကားပြော).\n"
+            f"STRICT RULES:\n"
+            f"1. Ignore background music, sound effects, and silence.\n"
+            f"2. Do NOT repeat senseless phrases like 'ဟုတ်တယ်မလား' or produce hallucinated loops.\n"
+            f"3. Provide output strictly in standard SRT format with sequential numbering and timestamps (00:00:00,000 --> 00:00:02,000).\n"
+            f"4. Do NOT output JSON format, markdown backticks, or explanatory commentary."
         )
 
         payload = {
@@ -91,45 +128,31 @@ def step1_process():
                     continue
 
         if not raw_result:
-            return jsonify({"error": "Gemini analysis failed."}), 500
+            return jsonify({"error": "Gemini speech transcription failed."}), 500
 
-        # JSON Parse ပြုလုပ်ခြင်း
-        cleaned_json = re.sub(r'^```(json)?\s*', '', raw_result, flags=re.MULTILINE)
-        cleaned_json = re.sub(r'\s*```$', '', cleaned_json, flags=re.MULTILINE).strip()
+        # SRT နှင့် စာသားကို သန့်စင်စွာ ခွဲထုတ်ခြင်း
+        srt_clean = re.sub(r'^```(srt)?\n?', '', raw_result, flags=re.MULTILINE)
+        srt_clean = re.sub(r'```$', '', srt_clean, flags=re.MULTILINE).strip()
 
-        script_text = ""
-        srt_content = ""
+        lines = srt_clean.split('\n')
+        text_lines = []
+        for line in lines:
+            l = line.strip()
+            if not l or l.isdigit() or '-->' in l: continue
+            text_lines.append(l)
 
-        try:
-            match = re.search(r'\{.*\}', cleaned_json, re.DOTALL)
-            if match:
-                data = json.loads(match.group(0))
-                script_text = data.get('script', '').strip()
-                srt_content = data.get('srt', '').strip()
-        except Exception:
-            pass
+        plain_text = " ".join(text_lines)
+        if not plain_text: plain_text = srt_clean
 
-        # အကယ်၍ JSON parse မဖြစ်ပါက လုံခြုံရေးအရ စာသားကို တိုက်ရိုက်ဆွဲထုတ်ခြင်း
-        if not script_text:
-            plain_lines = [l.strip() for l in cleaned_json.split('\n') if l.strip() and not l.strip().isdigit() and '-->' not in l]
-            script_text = " ".join(plain_lines)
-        if not srt_content:
-            srt_content = f"1\n00:00:00,000 --> 00:00:05,000\n{script_text}\n"
-
-        if not script_text:
-            script_text = "ဇာတ်လမ်းပြော စာသားကို ရယူနေပါသည်။"
-
-        with open(srt_filepath, 'w', encoding='utf-8') as f: 
-            f.write(srt_content)
-        with open(txt_filepath, 'w', encoding='utf-8') as f: 
-            f.write(script_text)
+        with open(srt_filepath, 'w', encoding='utf-8') as f: f.write(srt_clean)
+        with open(txt_filepath, 'w', encoding='utf-8') as f: f.write(plain_text)
 
         if os.path.exists(filepath): os.remove(filepath)
         if os.path.exists(audio_filepath): os.remove(audio_filepath)
 
         return jsonify({
             "file_id": unique_id, 
-            "translated_text": script_text, 
+            "translated_text": plain_text, 
             "srt_url": f"/download/srt/{unique_id}",
             "txt_url": f"/download/txt/{unique_id}"
         })
@@ -144,27 +167,25 @@ def step2_voice():
         voice_choice = data.get('voice', 'Nilar (Female)')
         lang = data.get('language', 'Myanmar')
         file_id = data.get('file_id')
-        
-        # စာသားပျောက်ဆုံးမှု မရှိစေရန် ဆာဗာဖိုင်ထဲမှပါ အလိုအလျောက် ပြန်ဖတ်သည့် စနစ်
+
         if not text and file_id:
             txt_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}.txt")
             if os.path.exists(txt_path):
-                with open(txt_path, 'r', encoding='utf-8') as f:
-                    text = f.read().strip()
+                with open(txt_path, 'r', encoding='utf-8') as f: text = f.read().strip()
 
         if not text:
-            text = "ဇာတ်လမ်းကို စတင်တင်ဆက်ပေးပါမည်။"
+            return jsonify({"error": "No text available for voice synthesis."}), 400
 
         voice_filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_voice.mp3")
         
-        # နာမည်ကြီး Microsoft Edge-TTS Nilar / Thiha Voices
         voice_mapping = {
             "Myanmar": {"Nilar (Female)": "my-MM-NilarNeural", "Thiha (Male)": "my-MM-ThihaNeural"},
             "English": {"en-US-AriaNeural": "en-US-AriaNeural"}
         }
         selected_voice = voice_mapping.get(lang, {}).get(voice_choice, "my-MM-NilarNeural")
-        
-        asyncio.run(generate_edge_audio(text, selected_voice, voice_filepath))
+
+        # Proxy Fallback ဖြင့် အသံဖန်တီးခြင်း
+        asyncio.run(generate_edge_audio_with_proxy(text, selected_voice, voice_filepath))
 
         return jsonify({"voice_url": f"/download/voice/{file_id}"})
     except Exception as e:
@@ -178,4 +199,5 @@ def download_txt(file_id): return send_file(os.path.join(app.config['UPLOAD_FOLD
 def download_voice(file_id): return send_file(os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_voice.mp3"), as_attachment=True, download_name="voice_output.mp3", mimetype="audio/mpeg")
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
