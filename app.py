@@ -29,7 +29,7 @@ async def generate_audio(text, voice_model, output_path):
 
 @app.route('/')
 def home():
-    return "AI Recap Server V4 (Step-by-Step API) is Active!"
+    return "AI Recap Server V5 (Fixed Whisper & Translation) is Active!"
 
 # အဆင့် (၁) - ဗီဒီယိုမှ SRT ထုတ်ခြင်း
 @app.route('/step1_srt', methods=['POST'])
@@ -54,18 +54,28 @@ def step1_srt():
         except Exception:
             return jsonify({"error": "Audio extraction failed."}), 500
 
-        # Groq Whisper ဖြင့် စာသားထုတ်ခြင်း
+        # Groq Whisper ဖြင့် စာသားထုတ်ခြင်း (တရုတ်စာ မထွက်စေရန် ကာကွယ်ထားသည်)
         headers = {"Authorization": f"Bearer {api_key}"}
         with open(audio_filepath, 'rb') as f:
             files = {'file': ("audio.mp3", f, 'audio/mpeg')}
-            data = {'model': 'whisper-large-v3', 'response_format': 'verbose_json'}
+            data = {
+                'model': 'whisper-large-v3', 
+                'response_format': 'verbose_json',
+                'temperature': '0.0',
+                'prompt': 'This is a video transcription. Please transcribe clearly in the original language. Do not output traditional Chinese or simplified Chinese.'
+            }
             res = requests.post("https://api.groq.com/openai/v1/audio/transcriptions", headers=headers, files=files, data=data)
         
-        if res.status_code != 200: return jsonify({"error": "Groq API Error"}), 500
+        if res.status_code != 200: 
+            err_msg = res.json().get('error', {}).get('message', 'Groq API Error')
+            return jsonify({"error": f"Whisper Error: {err_msg}"}), 500
         
         resp_data = res.json()
         original_text = resp_data.get('text', '').strip()
-        if not original_text: return jsonify({"error": "No speech detected."}), 400
+        
+        # အသံလုံးဝ မပါလျှင် သို့မဟုတ် AI ကြောင်ပြီး တရုတ်စာထုတ်လျှင် ပိတ်ချမည်
+        if not original_text or "字幕" in original_text or "中文" in original_text:
+            return jsonify({"error": "No clear speech detected. Please upload a video with clear spoken words."}), 400
 
         # SRT ဖန်တီးခြင်း
         srt_content = ""
@@ -74,14 +84,14 @@ def step1_srt():
         with open(srt_filepath, 'w', encoding='utf-8') as f: f.write(srt_content)
 
         # ဖိုင်အဟောင်းများ ရှင်းလင်းခြင်း
-        os.remove(filepath)
-        os.remove(audio_filepath)
+        if os.path.exists(filepath): os.remove(filepath)
+        if os.path.exists(audio_filepath): os.remove(audio_filepath)
 
         return jsonify({"file_id": unique_id, "original_text": original_text, "srt_url": f"/download/srt/{unique_id}"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# အဆင့် (၂) - ဘာသာပြန်ခြင်း
+# အဆင့် (၂) - ဘာသာပြန်ခြင်း (mixtral-8x7b-32768 အား အသုံးပြုထားသည်)
 @app.route('/step2_translate', methods=['POST'])
 def step2_translate():
     try:
@@ -97,10 +107,19 @@ def step2_translate():
         else:
             chat_url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text:\n\n{text}"
-            payload = {"model": "openai/gpt-oss-20b", "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}
+            prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text without timestamps:\n\n{text}"
+            payload = {
+                "model": "mixtral-8x7b-32768", 
+                "messages": [
+                    {"role": "system", "content": f"You are a professional translator converting text to {lang}."},
+                    {"role": "user", "content": prompt}
+                ], 
+                "temperature": 0.3
+            }
             res = requests.post(chat_url, headers=headers, json=payload)
-            if res.status_code != 200: return jsonify({"error": "Translation failed."}), 500
+            if res.status_code != 200: 
+                err_msg = res.json().get('error', {}).get('message', 'Translation Failed')
+                return jsonify({"error": f"Groq Translate Error: {err_msg}"}), 500
             translated_text = res.json()['choices'][0]['message']['content']
 
         with open(txt_filepath, 'w', encoding='utf-8') as f: f.write(translated_text)
