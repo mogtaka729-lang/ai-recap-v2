@@ -111,16 +111,16 @@ def step2_translate():
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text:\n\n{text}"
             
-            # သေချာပေါက်ရသော llama3-8b-8192 ကိုသာ အသုံးပြုသည်
+            # Groq က လက်ရှိထောက်ပံ့ထားသော production chat model ကို အသုံးပြုသည်
             payload = {
-                "model": "llama3-8b-8192", 
+                "model": "openai/gpt-oss-20b", 
                 "messages": [
                     {"role": "system", "content": f"You are a professional translator converting text to {lang}."},
                     {"role": "user", "content": prompt}
                 ], 
                 "temperature": 0.3
             }
-            res = requests.post(chat_url, headers=headers, json=payload)
+            res = requests.post(chat_url, headers=headers, json=payload, timeout=90)
             
             if res.status_code == 200:
                 translated_text = res.json()['choices'][0]['message']['content'].strip()
