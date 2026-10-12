@@ -4,3 +4,4 @@ requests
 edge-tts
 imageio-ffmpeg
 gunicorn
+moviepy
