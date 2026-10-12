@@ -32,7 +32,7 @@ def srt_to_text(srt_content):
 
 @app.route('/')
 def home():
-    return "AI Recap Server V19 (Gemini 3.8 Flash Supported) is Active!"
+    return "AI Recap Server (Ultra-Stable 3.5 Flash-Lite) is Active!"
 
 @app.route('/step1_process', methods=['POST'])
 def step1_process():
@@ -52,7 +52,7 @@ def step1_process():
         
         video_file.save(filepath)
 
-        # မြန်နှုန်းမြင့် FFMPEG ဖြင့် အသံဆွဲထုတ်ခြင်း
+        # FFMPEG ဖြင့် အသံဆွဲထုတ်ခြင်း
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         subprocess.run([ffmpeg_exe, '-i', filepath, '-vn', '-b:a', '64k', audio_filepath, '-y'], 
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
@@ -60,22 +60,21 @@ def step1_process():
         with open(audio_filepath, "rb") as f:
             audio_data = base64.b64encode(f.read()).decode('utf-8')
 
-        # Google မှ တိုက်ရိုက်ညွှန်းဆိုထားသော gemini-3.8-flash မော်ဒယ်သစ်ကို အဓိကထား အသုံးပြုခြင်း
+        # Google ၏ အငြိမ်ဆုံးနှင့် အမြန်ဆုံး Stable Model များကိုသာ အသုံးပြုခြင်း
         models_to_try = [
-            "gemini-3.8-flash",
-            "gemini-2.0-flash",
-            "gemini-2.5-flash"
+            "gemini-3.5-flash-lite",
+            "gemini-3.8-flash"
         ]
 
-        prompt = f"Listen to this audio. Transcribe and translate the speech into natural {lang}. Output EXACTLY in standard SRT format (with accurate timestamps). Do not include markdown codeblocks or extra notes."
+        prompt = f"Listen to this audio carefully. Transcribe the speech and translate it into natural, engaging {lang}. Output strictly in standard SRT format (1, timestamps 00:00:00,000 --> 00:00:02,000, subtitle text). Do not include any explanations or markdown backticks."
+        
         payload = {
             "contents": [{
                 "parts": [
                     {"text": prompt},
                     {"inlineData": {"mimeType": "audio/mp3", "data": audio_data}}
                 ]
-            }],
-            "generationConfig": {"temperature": 0.1}
+            }]
         }
 
         srt_content = None
@@ -95,7 +94,7 @@ def step1_process():
                 except Exception:
                     continue
             else:
-                last_error = res.json().get('error', {}).get('message', 'Model Failed')
+                last_error = res.json().get('error', {}).get('message', f"{model_name} failed")
 
         if not srt_content:
             return jsonify({"error": f"Gemini Error: {last_error}"}), 500
@@ -135,10 +134,7 @@ def step2_voice():
         voice_filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_voice.mp3")
         voice_mapping = {
             "Myanmar": {"Nilar (Female)": "my-MM-NilarNeural", "Thiha (Male)": "my-MM-ThihaNeural"},
-            "English": {"Nilar (Female)": "en-US-AriaNeural", "Thiha (Male)": "en-US-GuyNeural"},
-            "Japanese": {"Nilar (Female)": "ja-JP-NanamiNeural", "Thiha (Male)": "ja-JP-KeitaNeural"},
-            "Russian": {"Nilar (Female)": "ru-RU-SvetlanaNeural", "Thiha (Male)": "ru-RU-DmitryNeural"},
-            "Thai": {"Nilar (Female)": "th-TH-PremwadeeNeural", "Thiha (Male)": "th-TH-NiwatNeural"}
+            "English": {"en-US-AriaNeural": "en-US-AriaNeural"}
         }
         selected_voice = voice_mapping.get(lang, {}).get(voice_choice, "my-MM-NilarNeural")
         
