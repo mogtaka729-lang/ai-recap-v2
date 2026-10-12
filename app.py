@@ -29,14 +29,15 @@ async def generate_audio(text, voice_model, output_path):
 
 @app.route('/')
 def home():
-    return "AI Recap Server V11 (Final Fix) is Active!"
+    return "AI Recap Server V12 (Gemini API for Translation) is Active!"
 
-# အဆင့် (၁) - ဗီဒီယိုမှ SRT ထုတ်ခြင်း (Form Data အနေဖြင့် လက်ခံမည်)
+# အဆင့် (၁) - ဗီဒီယိုမှ SRT ထုတ်ခြင်း (Groq Whisper အသုံးပြုဆဲ)
 @app.route('/step1_srt', methods=['POST'])
 def step1_srt():
     try:
+        # ဒီအဆင့်အတွက် Groq API Key လိုအပ်ပါသည်
         api_key = request.form.get('api_key')
-        if not api_key: return jsonify({"error": "API Key is required."}), 400
+        if not api_key: return jsonify({"error": "Groq API Key is required for Step 1."}), 400
         if 'video' not in request.files: return jsonify({"error": "Video file is required."}), 400
 
         unique_id = str(uuid.uuid4())
@@ -87,19 +88,20 @@ def step1_srt():
     except Exception as e:
         return jsonify({"error": f"Server Error in Step 1: {str(e)}"}), 500
 
-# အဆင့် (၂) - ဘာသာပြန်ခြင်း (JSON အနေဖြင့် လက်ခံမည်)
+# အဆင့် (၂) - ဘာသာပြန်ခြင်း (Google Gemini API အား ပြောင်းလဲ အသုံးပြုထားသည်)
 @app.route('/step2_translate', methods=['POST'])
 def step2_translate():
     try:
         data = request.json
         if not data: return jsonify({"error": "Invalid JSON data received."}), 400
         
-        api_key = data.get('api_key')
+        # UI မှ လာသော API Key အား Gemini API Key အဖြစ် အသုံးပြုမည် 
+        gemini_api_key = data.get('api_key')
         text = data.get('text')
         lang = data.get('language')
         file_id = data.get('file_id')
         
-        if not all([api_key, text, lang, file_id]):
+        if not all([gemini_api_key, text, lang, file_id]):
             return jsonify({"error": "Missing required parameters (api_key, text, language, or file_id)."}), 400
 
         txt_filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}.txt")
@@ -107,33 +109,34 @@ def step2_translate():
         if lang == "English":
             translated_text = text
         else:
-            chat_url = "https://api.groq.com/openai/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text:\n\n{text}"
+            # Google Gemini API ချိတ်ဆက်ခြင်း
+            gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_api_key}"
+            headers = {"Content-Type": "application/json"}
+            prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text without any other comments:\n\n{text}"
             
-            # Groq က လက်ရှိထောက်ပံ့ထားသော production chat model ကို အသုံးပြုသည်
             payload = {
-                "model": "openai/gpt-oss-20b", 
-                "messages": [
-                    {"role": "system", "content": f"You are a professional translator converting text to {lang}."},
-                    {"role": "user", "content": prompt}
-                ], 
-                "temperature": 0.3
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.3}
             }
-            res = requests.post(chat_url, headers=headers, json=payload, timeout=90)
+            
+            res = requests.post(gemini_url, headers=headers, json=payload)
             
             if res.status_code == 200:
-                translated_text = res.json()['choices'][0]['message']['content'].strip()
+                # Gemini မှ ပြန်လာသော စာသားကို ဖမ်းယူခြင်း
+                try:
+                    translated_text = res.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+                except (KeyError, IndexError):
+                    return jsonify({"error": "Failed to parse Gemini response."}), 500
             else:
-                err_msg = res.json().get('error', {}).get('message', 'Unknown Translate Error')
-                return jsonify({"error": f"API Error: {err_msg}"}), 500
+                err_msg = res.json().get('error', {}).get('message', 'Unknown Gemini Error')
+                return jsonify({"error": f"Gemini Translate Error: {err_msg}"}), 500
 
         with open(txt_filepath, 'w', encoding='utf-8') as f: f.write(translated_text)
         return jsonify({"translated_text": translated_text, "txt_url": f"/download/txt/{file_id}"})
     except Exception as e:
         return jsonify({"error": f"Server Error in Step 2: {str(e)}"}), 500
 
-# အဆင့် (၃) - အသံထုတ်ခြင်း (JSON အနေဖြင့် လက်ခံမည်)
+# အဆင့် (၃) - အသံထုတ်ခြင်း (Microsoft Edge TTS)
 @app.route('/step3_voice', methods=['POST'])
 def step3_voice():
     try:
