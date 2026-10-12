@@ -7,6 +7,7 @@ import subprocess
 import imageio_ffmpeg
 import base64
 import re
+import json
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
@@ -17,22 +18,79 @@ UPLOAD_FOLDER = '/tmp/recap_files'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-async def generate_audio(text, voice_model, output_path):
+async def generate_edge_audio(text, voice_model, output_path):
     communicate = edge_tts.Communicate(text, voice_model)
     await communicate.save(output_path)
 
-def srt_to_text(srt_content):
-    lines = srt_content.split('\n')
-    text_lines = []
-    for line in lines:
-        line = line.strip()
-        if not line or line.isdigit() or '-->' in line: continue
-        text_lines.append(line)
-    return ' '.join(text_lines)
+def google_tts_fallback(text, lang, output_path):
+    """Microsoft 403 ပိတ်ပါက Google Voice ဖြင့် အလိုအလျောက် အစားထိုး အသံထုတ်ပေးမည့် စနစ်"""
+    lang_code = 'my' if lang == 'Myanmar' else 'en'
+    words = text.split()
+    chunks = []
+    curr = ""
+    for w in words:
+        if len(curr) + len(w) + 1 < 150:
+            curr += (" " if curr else "") + w
+        else:
+            if curr: chunks.append(curr)
+            curr = w
+    if curr: chunks.append(curr)
+    if not chunks: chunks = [text[:150]]
+
+    audio_bytes = bytearray()
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    for chunk in chunks:
+        url = f"https://translate.google.com/translate_tts?ie=UTF-8&tl={lang_code}&client=tw-ob&q={requests.utils.quote(chunk)}"
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            audio_bytes.extend(r.content)
+    
+    if len(audio_bytes) > 0:
+        with open(output_path, "wb") as f:
+            f.write(audio_bytes)
+        return True
+    return False
+
+def parse_subtitles_and_text(raw_output):
+    """JSON သို့မဟုတ် SRT မှ စာသားများကို သန့်စင်ပြီးသား စာသားစစ်စစ်အဖြစ် ပြောင်းလဲခြင်း"""
+    cleaned = re.sub(r'^```(json|srt)?\n?', '', raw_output, flags=re.MULTILINE)
+    cleaned = re.sub(r'```$', '', cleaned, flags=re.MULTILINE).strip()
+    
+    # JSON ပုံစံဖြင့် ထွက်လာပါက
+    try:
+        match = re.search(r'\[\s*\{.*\}\s*\]', cleaned, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            srt_lines = []
+            plain_texts = []
+            for idx, item in enumerate(data, 1):
+                start = item.get('start', '00:00:00,000')
+                end = item.get('end', '00:00:02,000')
+                text = item.get('text', '').strip()
+                if text:
+                    if start.count(':') == 1: start = f"00:{start}"
+                    if end.count(':') == 1: end = f"00:{end}"
+                    srt_lines.append(f"{idx}\n{start} --> {end}\n{text}\n")
+                    plain_texts.append(text)
+            return "\n".join(srt_lines), " ".join(plain_texts)
+    except Exception:
+        pass
+
+    # Standard SRT ဖြစ်ပါက
+    if '-->' in cleaned:
+        lines = cleaned.split('\n')
+        plain = []
+        for line in lines:
+            l = line.strip()
+            if not l or l.isdigit() or '-->' in l: continue
+            plain.append(l)
+        return cleaned, " ".join(plain)
+    
+    return f"1\n00:00:00,000 --> 00:00:05,000\n{cleaned}\n", cleaned
 
 @app.route('/')
 def home():
-    return "AI Recap Server (Ultra-Stable 3.5 Flash-Lite) is Active!"
+    return "AI Recap Server (100% Complete & Stable) is Active!"
 
 @app.route('/step1_process', methods=['POST'])
 def step1_process():
@@ -52,7 +110,6 @@ def step1_process():
         
         video_file.save(filepath)
 
-        # FFMPEG ဖြင့် အသံဆွဲထုတ်ခြင်း
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         subprocess.run([ffmpeg_exe, '-i', filepath, '-vn', '-b:a', '64k', audio_filepath, '-y'], 
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
@@ -60,14 +117,12 @@ def step1_process():
         with open(audio_filepath, "rb") as f:
             audio_data = base64.b64encode(f.read()).decode('utf-8')
 
-        # Google ၏ အငြိမ်ဆုံးနှင့် အမြန်ဆုံး Stable Model များကိုသာ အသုံးပြုခြင်း
         models_to_try = [
             "gemini-3.5-flash-lite",
             "gemini-3.8-flash"
         ]
 
-        prompt = f"Listen to this audio carefully. Transcribe the speech and translate it into natural, engaging {lang}. Output strictly in standard SRT format (1, timestamps 00:00:00,000 --> 00:00:02,000, subtitle text). Do not include any explanations or markdown backticks."
-        
+        prompt = f"Listen to this audio. Transcribe and translate the speech into natural {lang}. Output strictly in standard SRT format with timestamps. No explanations."
         payload = {
             "contents": [{
                 "parts": [
@@ -77,45 +132,35 @@ def step1_process():
             }]
         }
 
-        srt_content = None
-        last_error = ""
-
+        raw_result = None
         for model_name in models_to_try:
             gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-            headers = {"Content-Type": "application/json"}
-            
-            res = requests.post(gemini_url, headers=headers, json=payload)
+            res = requests.post(gemini_url, headers={"Content-Type": "application/json"}, json=payload)
             if res.status_code == 200:
                 try:
                     candidates = res.json().get('candidates', [])
                     if candidates and 'content' in candidates[0]:
-                        srt_content = candidates[0]['content']['parts'][0]['text'].strip()
+                        raw_result = candidates[0]['content']['parts'][0]['text'].strip()
                         break
                 except Exception:
                     continue
-            else:
-                last_error = res.json().get('error', {}).get('message', f"{model_name} failed")
 
-        if not srt_content:
-            return jsonify({"error": f"Gemini Error: {last_error}"}), 500
+        if not raw_result:
+            return jsonify({"error": "Gemini processing failed."}), 500
 
-        # Markdown အမှိုက်များ ရှင်းလင်းခြင်း
-        srt_content = re.sub(r'^```(srt)?\n?', '', srt_content, flags=re.MULTILINE)
-        srt_content = re.sub(r'```$', '', srt_content, flags=re.MULTILINE).strip()
+        srt_content, clean_text = parse_subtitles_and_text(raw_result)
 
         with open(srt_filepath, 'w', encoding='utf-8') as f: 
             f.write(srt_content)
-        
-        translated_text = srt_to_text(srt_content)
         with open(txt_filepath, 'w', encoding='utf-8') as f: 
-            f.write(translated_text)
+            f.write(clean_text)
 
         if os.path.exists(filepath): os.remove(filepath)
         if os.path.exists(audio_filepath): os.remove(audio_filepath)
 
         return jsonify({
             "file_id": unique_id, 
-            "translated_text": translated_text, 
+            "translated_text": clean_text, 
             "srt_url": f"/download/srt/{unique_id}",
             "txt_url": f"/download/txt/{unique_id}"
         })
@@ -126,9 +171,9 @@ def step1_process():
 def step2_voice():
     try:
         data = request.json
-        text = data.get('text')
-        voice_choice = data.get('voice')
-        lang = data.get('language')
+        text = data.get('text', '')
+        voice_choice = data.get('voice', 'Nilar (Female)')
+        lang = data.get('language', 'Myanmar')
         file_id = data.get('file_id')
         
         voice_filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_voice.mp3")
@@ -138,7 +183,15 @@ def step2_voice():
         }
         selected_voice = voice_mapping.get(lang, {}).get(voice_choice, "my-MM-NilarNeural")
         
-        asyncio.run(generate_audio(text, selected_voice, voice_filepath))
+        # ၁။ Edge-TTS ဖြင့် အရင်စမ်းသပ်မည်
+        try:
+            asyncio.run(generate_edge_audio(text, selected_voice, voice_filepath))
+        except Exception:
+            # ၂။ Microsoft 403 ဖြစ်ပါက Google Voice ဖြင့် အလိုအလျောက် ချက်ချင်း အစားထိုးထုတ်ယူမည်
+            success = google_tts_fallback(text, lang, voice_filepath)
+            if not success:
+                return jsonify({"error": "Failed to synthesize audio."}), 500
+
         return jsonify({"voice_url": f"/download/voice/{file_id}"})
     except Exception as e:
         return jsonify({"error": f"Voice Error: {str(e)}"}), 500
