@@ -92,7 +92,7 @@ def process_video():
             headers_chat = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             prompt = f"Translate the following text to natural {language}. Return ONLY the translated text without timestamps:\n\n{transcript_text}"
             chat_payload = {
-                "model": "mixtral-8x7b-32768",
+                "model": "openai/gpt-oss-20b",
                 "messages": [
                     {"role": "system", "content": f"You are a professional translator translating to {language}."},
                     {"role": "user", "content": prompt}
