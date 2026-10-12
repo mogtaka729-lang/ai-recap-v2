@@ -1,6 +1,6 @@
 Flask
 Flask-Cors
 requests
-edge-tts
+edge-tts>=7.2.8
 imageio-ffmpeg
 gunicorn
