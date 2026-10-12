@@ -29,9 +29,9 @@ async def generate_audio(text, voice_model, output_path):
 
 @app.route('/')
 def home():
-    return "AI Recap Server V9 (Oct 2026 - GPT-OSS Model) is Active!"
+    return "AI Recap Server V10 (Stable Oct 2026) is Active!"
 
-# အဆင့် (၁) - ဗီဒီယိုမှ SRT ထုတ်ခြင်း (Whisper အလုပ်လုပ်ဆဲဖြစ်သည်)
+# အဆင့် (၁) - ဗီဒီယိုမှ SRT ထုတ်ခြင်း 
 @app.route('/step1_srt', methods=['POST'])
 def step1_srt():
     try:
@@ -110,7 +110,7 @@ def step2_translate():
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text:\n\n{text}"
             
-            # ၂၀၂၆ အောက်တိုဘာလအထိ အလုပ်လုပ်သော gpt-oss-20b နှင့် qwen3.8-27b ကို ပြောင်းသုံးထားသည်
+            # ၂၀၂၆ အောက်တိုဘာလတွင် အခမဲ့ သုံးနိုင်သော မော်ဒယ်သစ်များ (GPT-OSS နှင့် Qwen)
             models = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
             translated_text = None
             last_error = ""
