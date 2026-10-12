@@ -29,9 +29,9 @@ async def generate_audio(text, voice_model, output_path):
 
 @app.route('/')
 def home():
-    return "AI Recap Server V8 (Stable Llama3 Model) is Active!"
+    return "AI Recap Server V9 (Oct 2026 - GPT-OSS Model) is Active!"
 
-# အဆင့် (၁) - ဗီဒီယိုမှ SRT ထုတ်ခြင်း
+# အဆင့် (၁) - ဗီဒီယိုမှ SRT ထုတ်ခြင်း (Whisper အလုပ်လုပ်ဆဲဖြစ်သည်)
 @app.route('/step1_srt', methods=['POST'])
 def step1_srt():
     try:
@@ -110,21 +110,28 @@ def step2_translate():
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text:\n\n{text}"
             
-            # သေချာပေါက် အလုပ်လုပ်မည့် llama3-8b-8192 ကိုသာ အသုံးပြုထားသည်
-            payload = {
-                "model": "llama3-8b-8192", 
-                "messages": [
-                    {"role": "system", "content": f"You are a professional translator converting text to {lang}."},
-                    {"role": "user", "content": prompt}
-                ], 
-                "temperature": 0.3
-            }
+            # ၂၀၂၆ အောက်တိုဘာလအထိ အလုပ်လုပ်သော gpt-oss-20b နှင့် qwen3.8-27b ကို ပြောင်းသုံးထားသည်
+            models = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+            translated_text = None
+            last_error = ""
+
+            for model in models:
+                payload = {
+                    "model": model, 
+                    "messages": [
+                        {"role": "system", "content": f"You are a professional translator converting text to {lang}."},
+                        {"role": "user", "content": prompt}
+                    ], 
+                    "temperature": 0.3
+                }
+                res = requests.post(chat_url, headers=headers, json=payload)
+                if res.status_code == 200:
+                    translated_text = res.json()['choices'][0]['message']['content'].strip()
+                    break  
+                else:
+                    last_error = res.json().get('error', {}).get('message', 'Failed')
             
-            res = requests.post(chat_url, headers=headers, json=payload)
-            if res.status_code == 200:
-                translated_text = res.json()['choices'][0]['message']['content'].strip()
-            else:
-                last_error = res.json().get('error', {}).get('message', 'Failed')
+            if not translated_text:
                 return jsonify({"error": f"Groq Translate Error: {last_error}"}), 500
 
         with open(txt_filepath, 'w', encoding='utf-8') as f: 
