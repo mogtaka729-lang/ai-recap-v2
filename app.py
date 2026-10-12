@@ -55,11 +55,12 @@ def step1_srt():
             return jsonify({"error": "Audio extraction failed."}), 500
 
         # Groq Whisper ဖြင့် စာသားထုတ်ခြင်း (တရုတ်စာ မထွက်စေရန် ကာကွယ်ထားသည်)
+        # အသစ်ထွက်သော whisper-large-v3-turbo ကို ပြောင်းသုံးထားသည်
         headers = {"Authorization": f"Bearer {api_key}"}
         with open(audio_filepath, 'rb') as f:
             files = {'file': ("audio.mp3", f, 'audio/mpeg')}
             data = {
-                'model': 'whisper-large-v3', 
+                'model': 'whisper-large-v3-turbo', 
                 'response_format': 'verbose_json',
                 'temperature': '0.0',
                 'prompt': 'This is a video transcription. Please transcribe clearly in the original language. Do not output traditional Chinese or simplified Chinese.'
@@ -91,7 +92,7 @@ def step1_srt():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# အဆင့် (၂) - ဘာသာပြန်ခြင်း (mixtral-8x7b-32768 အား အသုံးပြုထားသည်)
+# အဆင့် (၂) - ဘာသာပြန်ခြင်း (openai/gpt-oss-20b အား အသုံးပြုထားသည်)
 @app.route('/step2_translate', methods=['POST'])
 def step2_translate():
     try:
@@ -109,7 +110,7 @@ def step2_translate():
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text without timestamps:\n\n{text}"
             payload = {
-                "model": "mixtral-8x7b-32768", 
+                "model": "openai/gpt-oss-20b", 
                 "messages": [
                     {"role": "system", "content": f"You are a professional translator converting text to {lang}."},
                     {"role": "user", "content": prompt}
