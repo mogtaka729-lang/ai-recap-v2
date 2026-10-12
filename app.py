@@ -92,7 +92,7 @@ def process_video():
             headers_chat = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             prompt = f"Translate the following text to natural {language}. Return ONLY the translated text without timestamps:\n\n{transcript_text}"
             chat_payload = {
-                "model": "llama-3.1-8b-instant",
+                "model": "llama3-8b-8192",
                 "messages": [
                     {"role": "system", "content": f"You are a professional translator translating to {language}."},
                     {"role": "user", "content": prompt}
