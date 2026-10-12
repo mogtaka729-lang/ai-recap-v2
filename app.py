@@ -9,7 +9,6 @@ from werkzeug.utils import secure_filename
 from moviepy.editor import VideoFileClip
 
 app = Flask(__name__)
-# CORS အားလုံးကို လက်ခံပေးရန် ဖွင့်ထားသည်
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 UPLOAD_FOLDER = '/tmp/recap_files'
@@ -29,9 +28,8 @@ async def generate_audio(text, voice_model, output_path):
 
 @app.route('/')
 def home():
-    return "AI Recap Server V5 (Fixed Whisper & Translation) is Active!"
+    return "AI Recap Server V6 (Auto-Fallback AI) is Active!"
 
-# အဆင့် (၁) - ဗီဒီယိုမှ SRT ထုတ်ခြင်း
 @app.route('/step1_srt', methods=['POST'])
 def step1_srt():
     try:
@@ -46,7 +44,6 @@ def step1_srt():
         srt_filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}.srt")
         video_file.save(filepath)
 
-        # အသံထုတ်ခြင်း
         try:
             video_clip = VideoFileClip(filepath)
             video_clip.audio.write_audiofile(audio_filepath, logger=None)
@@ -54,37 +51,30 @@ def step1_srt():
         except Exception:
             return jsonify({"error": "Audio extraction failed."}), 500
 
-        # Groq Whisper ဖြင့် စာသားထုတ်ခြင်း (တရုတ်စာ မထွက်စေရန် ကာကွယ်ထားသည်)
-        # အသစ်ထွက်သော whisper-large-v3-turbo ကို ပြောင်းသုံးထားသည်
         headers = {"Authorization": f"Bearer {api_key}"}
         with open(audio_filepath, 'rb') as f:
             files = {'file': ("audio.mp3", f, 'audio/mpeg')}
             data = {
                 'model': 'whisper-large-v3-turbo', 
                 'response_format': 'verbose_json',
-                'temperature': '0.0',
-                'prompt': 'This is a video transcription. Please transcribe clearly in the original language. Do not output traditional Chinese or simplified Chinese.'
+                'temperature': '0.0'
             }
             res = requests.post("https://api.groq.com/openai/v1/audio/transcriptions", headers=headers, files=files, data=data)
         
         if res.status_code != 200: 
-            err_msg = res.json().get('error', {}).get('message', 'Groq API Error')
-            return jsonify({"error": f"Whisper Error: {err_msg}"}), 500
+            return jsonify({"error": f"Whisper Error: {res.json().get('error', {}).get('message', 'API Error')}"}), 500
         
         resp_data = res.json()
         original_text = resp_data.get('text', '').strip()
         
-        # အသံလုံးဝ မပါလျှင် သို့မဟုတ် AI ကြောင်ပြီး တရုတ်စာထုတ်လျှင် ပိတ်ချမည်
-        if not original_text or "字幕" in original_text or "中文" in original_text:
-            return jsonify({"error": "No clear speech detected. Please upload a video with clear spoken words."}), 400
+        if not original_text:
+            return jsonify({"error": "No clear speech detected in the video."}), 400
 
-        # SRT ဖန်တီးခြင်း
         srt_content = ""
         for i, seg in enumerate(resp_data.get('segments', [])):
             srt_content += f"{i+1}\n{format_time(seg['start'])} --> {format_time(seg['end'])}\n{seg['text'].strip()}\n\n"
         with open(srt_filepath, 'w', encoding='utf-8') as f: f.write(srt_content)
 
-        # ဖိုင်အဟောင်းများ ရှင်းလင်းခြင်း
         if os.path.exists(filepath): os.remove(filepath)
         if os.path.exists(audio_filepath): os.remove(audio_filepath)
 
@@ -92,7 +82,6 @@ def step1_srt():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# အဆင့် (၂) - ဘာသာပြန်ခြင်း (openai/gpt-oss-20b အား အသုံးပြုထားသည်)
 @app.route('/step2_translate', methods=['POST'])
 def step2_translate():
     try:
@@ -108,27 +97,37 @@ def step2_translate():
         else:
             chat_url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text without timestamps:\n\n{text}"
-            payload = {
-                "model": "openai/gpt-oss-20b", 
-                "messages": [
-                    {"role": "system", "content": f"You are a professional translator converting text to {lang}."},
-                    {"role": "user", "content": prompt}
-                ], 
-                "temperature": 0.3
-            }
-            res = requests.post(chat_url, headers=headers, json=payload)
-            if res.status_code != 200: 
-                err_msg = res.json().get('error', {}).get('message', 'Translation Failed')
-                return jsonify({"error": f"Groq Translate Error: {err_msg}"}), 500
-            translated_text = res.json()['choices'][0]['message']['content']
+            prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text:\n\n{text}"
+            
+            # AI အကောင် ၃ ကောင်ဖြင့် အလိုအလျောက် ပြောင်းလဲချိတ်ဆက်မည့်စနစ် (Fallback)
+            models = ["llama-3.3-70b-versatile", "gemma2-9b-it", "llama-3.1-8b-instant"]
+            translated_text = None
+            last_error = ""
+
+            for model in models:
+                payload = {
+                    "model": model, 
+                    "messages": [
+                        {"role": "system", "content": f"You are a professional translator converting text to {lang}."},
+                        {"role": "user", "content": prompt}
+                    ], 
+                    "temperature": 0.3
+                }
+                res = requests.post(chat_url, headers=headers, json=payload)
+                if res.status_code == 200:
+                    translated_text = res.json()['choices'][0]['message']['content'].strip()
+                    break
+                else:
+                    last_error = res.json().get('error', {}).get('message', 'Failed')
+            
+            if not translated_text:
+                return jsonify({"error": f"Groq Translate Error: {last_error}"}), 500
 
         with open(txt_filepath, 'w', encoding='utf-8') as f: f.write(translated_text)
         return jsonify({"translated_text": translated_text, "txt_url": f"/download/txt/{file_id}"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# အဆင့် (၃) - အသံထုတ်ခြင်း
 @app.route('/step3_voice', methods=['POST'])
 def step3_voice():
     try:
