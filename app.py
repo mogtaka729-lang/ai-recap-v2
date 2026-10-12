@@ -9,6 +9,7 @@ from werkzeug.utils import secure_filename
 from moviepy.editor import VideoFileClip
 
 app = Flask(__name__)
+# CORS အားလုံးကို လက်ခံပေးရန် ဖွင့်ထားသည်
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 UPLOAD_FOLDER = '/tmp/recap_files'
@@ -28,8 +29,9 @@ async def generate_audio(text, voice_model, output_path):
 
 @app.route('/')
 def home():
-    return "AI Recap Server V6 (Auto-Fallback AI) is Active!"
+    return "AI Recap Server V7 (Latest AI Models) is Active!"
 
+# အဆင့် (၁) - ဗီဒီယိုမှ SRT ထုတ်ခြင်း
 @app.route('/step1_srt', methods=['POST'])
 def step1_srt():
     try:
@@ -44,6 +46,7 @@ def step1_srt():
         srt_filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}.srt")
         video_file.save(filepath)
 
+        # အသံထုတ်ခြင်း
         try:
             video_clip = VideoFileClip(filepath)
             video_clip.audio.write_audiofile(audio_filepath, logger=None)
@@ -51,13 +54,15 @@ def step1_srt():
         except Exception:
             return jsonify({"error": "Audio extraction failed."}), 500
 
+        # Groq Whisper ဖြင့် စာသားထုတ်ခြင်း (တရုတ်စာ မထွက်စေရန် ကာကွယ်ထားသည်)
         headers = {"Authorization": f"Bearer {api_key}"}
         with open(audio_filepath, 'rb') as f:
             files = {'file': ("audio.mp3", f, 'audio/mpeg')}
             data = {
                 'model': 'whisper-large-v3-turbo', 
                 'response_format': 'verbose_json',
-                'temperature': '0.0'
+                'temperature': '0.0',
+                'prompt': 'This is a video transcription. Please transcribe clearly in the original language. Do not output traditional Chinese or simplified Chinese.'
             }
             res = requests.post("https://api.groq.com/openai/v1/audio/transcriptions", headers=headers, files=files, data=data)
         
@@ -67,7 +72,7 @@ def step1_srt():
         resp_data = res.json()
         original_text = resp_data.get('text', '').strip()
         
-        if not original_text:
+        if not original_text or "字幕" in original_text or "中文" in original_text:
             return jsonify({"error": "No clear speech detected in the video."}), 400
 
         srt_content = ""
@@ -82,6 +87,7 @@ def step1_srt():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# အဆင့် (၂) - ဘာသာပြန်ခြင်း 
 @app.route('/step2_translate', methods=['POST'])
 def step2_translate():
     try:
@@ -99,8 +105,8 @@ def step2_translate():
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text:\n\n{text}"
             
-            # AI အကောင် ၃ ကောင်ဖြင့် အလိုအလျောက် ပြောင်းလဲချိတ်ဆက်မည့်စနစ် (Fallback)
-            models = ["llama-3.3-70b-versatile", "gemma2-9b-it", "llama-3.1-8b-instant"]
+            # နောက်ဆုံးပေါ် AI (၄) မျိုးဖြင့် အလိုအလျောက် ပြောင်းလဲချိတ်ဆက်မည့်စနစ်
+            models = ["llama-3.3-70b-versatile", "llama-3.2-3b-preview", "llama-3.2-1b-preview", "gemma2-9b-it"]
             translated_text = None
             last_error = ""
 
@@ -116,7 +122,7 @@ def step2_translate():
                 res = requests.post(chat_url, headers=headers, json=payload)
                 if res.status_code == 200:
                     translated_text = res.json()['choices'][0]['message']['content'].strip()
-                    break
+                    break  # အောင်မြင်ပါက ကျန် AI များကို ဆက်မစစ်တော့ပါ
                 else:
                     last_error = res.json().get('error', {}).get('message', 'Failed')
             
@@ -128,36 +134,6 @@ def step2_translate():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# အဆင့် (၃) - အသံထုတ်ခြင်း
 @app.route('/step3_voice', methods=['POST'])
-def step3_voice():
-    try:
-        data = request.json
-        text = data.get('text')
-        voice_choice = data.get('voice')
-        lang = data.get('language')
-        file_id = data.get('file_id')
-        voice_filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_voice.mp3")
-
-        voice_mapping = {
-            "Myanmar": {"Nilar (Female)": "my-MM-NilarNeural", "Thiha (Male)": "my-MM-ThihaNeural"},
-            "English": {"Nilar (Female)": "en-US-AriaNeural", "Thiha (Male)": "en-US-GuyNeural"},
-            "Japanese": {"Nilar (Female)": "ja-JP-NanamiNeural", "Thiha (Male)": "ja-JP-KeitaNeural"},
-            "Russian": {"Nilar (Female)": "ru-RU-SvetlanaNeural", "Thiha (Male)": "ru-RU-DmitryNeural"},
-            "Thai": {"Nilar (Female)": "th-TH-PremwadeeNeural", "Thiha (Male)": "th-TH-NiwatNeural"}
-        }
-        selected_voice = voice_mapping.get(lang, {}).get(voice_choice, "my-MM-NilarNeural")
-        
-        asyncio.run(generate_audio(text, selected_voice, voice_filepath))
-        return jsonify({"voice_url": f"/download/voice/{file_id}"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/download/srt/<file_id>')
-def download_srt(file_id): return send_file(os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}.srt"), as_attachment=True, download_name="subtitle.srt")
-@app.route('/download/txt/<file_id>')
-def download_txt(file_id): return send_file(os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}.txt"), as_attachment=True, download_name="transcript.txt")
-@app.route('/download/voice/<file_id>')
-def download_voice(file_id): return send_file(os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_voice.mp3"), as_attachment=True, download_name="voice_output.mp3", mimetype="audio/mpeg")
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+def step3
