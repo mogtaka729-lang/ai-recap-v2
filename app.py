@@ -29,15 +29,17 @@ async def generate_audio(text, voice_model, output_path):
 
 @app.route('/')
 def home():
-    return "AI Recap Server V7 (Latest AI Models) is Active!"
+    return "AI Recap Server V7 (Fixed Syntax Error) is Active!"
 
 # အဆင့် (၁) - ဗီဒီယိုမှ SRT ထုတ်ခြင်း
 @app.route('/step1_srt', methods=['POST'])
 def step1_srt():
     try:
         api_key = request.form.get('api_key')
-        if not api_key: return jsonify({"error": "API Key missing."}), 400
-        if 'video' not in request.files: return jsonify({"error": "No video uploaded."}), 400
+        if not api_key: 
+            return jsonify({"error": "API Key missing."}), 400
+        if 'video' not in request.files: 
+            return jsonify({"error": "No video uploaded."}), 400
 
         unique_id = str(uuid.uuid4())
         video_file = request.files['video']
@@ -54,7 +56,7 @@ def step1_srt():
         except Exception:
             return jsonify({"error": "Audio extraction failed."}), 500
 
-        # Groq Whisper ဖြင့် စာသားထုတ်ခြင်း (တရုတ်စာ မထွက်စေရန် ကာကွယ်ထားသည်)
+        # Groq Whisper ဖြင့် စာသားထုတ်ခြင်း
         headers = {"Authorization": f"Bearer {api_key}"}
         with open(audio_filepath, 'rb') as f:
             files = {'file': ("audio.mp3", f, 'audio/mpeg')}
@@ -78,10 +80,13 @@ def step1_srt():
         srt_content = ""
         for i, seg in enumerate(resp_data.get('segments', [])):
             srt_content += f"{i+1}\n{format_time(seg['start'])} --> {format_time(seg['end'])}\n{seg['text'].strip()}\n\n"
-        with open(srt_filepath, 'w', encoding='utf-8') as f: f.write(srt_content)
+        with open(srt_filepath, 'w', encoding='utf-8') as f: 
+            f.write(srt_content)
 
-        if os.path.exists(filepath): os.remove(filepath)
-        if os.path.exists(audio_filepath): os.remove(audio_filepath)
+        if os.path.exists(filepath): 
+            os.remove(filepath)
+        if os.path.exists(audio_filepath): 
+            os.remove(audio_filepath)
 
         return jsonify({"file_id": unique_id, "original_text": original_text, "srt_url": f"/download/srt/{unique_id}"})
     except Exception as e:
@@ -105,7 +110,6 @@ def step2_translate():
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             prompt = f"Translate the following text to natural {lang}. Return ONLY the translated text:\n\n{text}"
             
-            # နောက်ဆုံးပေါ် AI (၄) မျိုးဖြင့် အလိုအလျောက် ပြောင်းလဲချိတ်ဆက်မည့်စနစ်
             models = ["llama-3.3-70b-versatile", "llama-3.2-3b-preview", "llama-3.2-1b-preview", "gemma2-9b-it"]
             translated_text = None
             last_error = ""
@@ -122,18 +126,55 @@ def step2_translate():
                 res = requests.post(chat_url, headers=headers, json=payload)
                 if res.status_code == 200:
                     translated_text = res.json()['choices'][0]['message']['content'].strip()
-                    break  # အောင်မြင်ပါက ကျန် AI များကို ဆက်မစစ်တော့ပါ
+                    break  
                 else:
                     last_error = res.json().get('error', {}).get('message', 'Failed')
             
             if not translated_text:
                 return jsonify({"error": f"Groq Translate Error: {last_error}"}), 500
 
-        with open(txt_filepath, 'w', encoding='utf-8') as f: f.write(translated_text)
+        with open(txt_filepath, 'w', encoding='utf-8') as f: 
+            f.write(translated_text)
         return jsonify({"translated_text": translated_text, "txt_url": f"/download/txt/{file_id}"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 # အဆင့် (၃) - အသံထုတ်ခြင်း
 @app.route('/step3_voice', methods=['POST'])
-def step3
+def step3_voice():
+    try:
+        data = request.json
+        text = data.get('text')
+        voice_choice = data.get('voice')
+        lang = data.get('language')
+        file_id = data.get('file_id')
+        voice_filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_voice.mp3")
+
+        voice_mapping = {
+            "Myanmar": {"Nilar (Female)": "my-MM-NilarNeural", "Thiha (Male)": "my-MM-ThihaNeural"},
+            "English": {"Nilar (Female)": "en-US-AriaNeural", "Thiha (Male)": "en-US-GuyNeural"},
+            "Japanese": {"Nilar (Female)": "ja-JP-NanamiNeural", "Thiha (Male)": "ja-JP-KeitaNeural"},
+            "Russian": {"Nilar (Female)": "ru-RU-SvetlanaNeural", "Thiha (Male)": "ru-RU-DmitryNeural"},
+            "Thai": {"Nilar (Female)": "th-TH-PremwadeeNeural", "Thiha (Male)": "th-TH-NiwatNeural"}
+        }
+        selected_voice = voice_mapping.get(lang, {}).get(voice_choice, "my-MM-NilarNeural")
+        
+        asyncio.run(generate_audio(text, selected_voice, voice_filepath))
+        return jsonify({"voice_url": f"/download/voice/{file_id}"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/download/srt/<file_id>')
+def download_srt(file_id): 
+    return send_file(os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}.srt"), as_attachment=True, download_name="subtitle.srt")
+
+@app.route('/download/txt/<file_id>')
+def download_txt(file_id): 
+    return send_file(os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}.txt"), as_attachment=True, download_name="transcript.txt")
+
+@app.route('/download/voice/<file_id>')
+def download_voice(file_id): 
+    return send_file(os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_voice.mp3"), as_attachment=True, download_name="voice_output.mp3", mimetype="audio/mpeg")
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
