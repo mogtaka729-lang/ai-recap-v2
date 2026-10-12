@@ -1,11 +1,12 @@
 import os
 import uuid
 import requests
+import asyncio
+import edge_tts
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from moviepy.editor import VideoFileClip
-from gtts import gTTS
 
 app = Flask(__name__)
 CORS(app)
@@ -14,7 +15,6 @@ UPLOAD_FOLDER = '/tmp/recap_files'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# အချိန်ကိုက် SRT အတွက် အချိန်ပြောင်းပေးသည့်စနစ်
 def format_time(seconds):
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
@@ -22,9 +22,14 @@ def format_time(seconds):
     millis = int((seconds - int(seconds)) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
+# Edge TTS ဖြင့် အသံဖန်တီးရန် Function
+async def generate_audio(text, voice_model, output_path):
+    communicate = edge_tts.Communicate(text, voice_model)
+    await communicate.save(output_path)
+
 @app.route('/')
 def home():
-    return "AI Recap Server V2 is Active!"
+    return "AI Recap Server V3 (Multilingual & Voices) is Active!"
 
 @app.route('/process', methods=['POST'])
 def process_video():
@@ -37,11 +42,11 @@ def process_video():
 
     try:
         api_key = request.form.get('api_key')
-        language = request.form.get('language', 'English')
+        language = request.form.get('language', 'Myanmar')
+        voice_choice = request.form.get('voice', 'Nilar (Female)')
         
         if not api_key:
             return jsonify({"error": "Groq API Key is missing. Please login."}), 400
-
         if 'video' not in request.files:
             return jsonify({"error": "No video uploaded."}), 400
             
@@ -55,24 +60,24 @@ def process_video():
             video_clip.audio.write_audiofile(audio_filepath, logger=None)
             video_clip.close()
         except Exception as e:
-            return jsonify({"error": f"Audio extraction failed: No sound detected or video issue."}), 500
+            return jsonify({"error": "Audio extraction failed: No sound detected or video issue."}), 500
 
-        # ၁။ Groq ဖြင့် စာသားထုတ်ခြင်း (JSON ပုံစံဖြင့် တောင်းခံ၍ Error ရှောင်ခြင်း)
         headers_audio = {"Authorization": f"Bearer {api_key}"}
         with open(audio_filepath, 'rb') as f:
             files = {'file': ("audio.mp3", f, 'audio/mpeg')}
             data = {'model': 'whisper-large-v3', 'response_format': 'verbose_json'}
             res_srt = requests.post("https://api.groq.com/openai/v1/audio/transcriptions", headers=headers_audio, files=files, data=data)
         
-        # Groq က ငြင်းခဲ့လျှင် အကြောင်းရင်းအမှန်ကို ဖော်ပြပေးရန်
         if res_srt.status_code != 200:
             err_msg = res_srt.json().get('error', {}).get('message', 'Unknown Groq Error')
             return jsonify({"error": f"Groq AI Error: {err_msg}"}), 500
             
         resp_data = res_srt.json()
-        transcript_text = resp_data.get('text', '')
+        transcript_text = resp_data.get('text', '').strip()
         
-        # ၂။ သေသပ်သော SRT အဖြစ် ပြောင်းလဲခြင်း
+        if not transcript_text:
+            return jsonify({"error": "No speech detected in the video. Please upload a video with clear spoken words."}), 400
+        
         srt_content = ""
         segments = resp_data.get('segments', [])
         for i, seg in enumerate(segments):
@@ -86,7 +91,7 @@ def process_video():
 
         final_transcript = transcript_text
 
-        # ၃။ ဘာသာပြန်ခြင်း
+        # ဘာသာပြန်ခြင်း (gpt-oss-20b)
         if language != "English":
             chat_url = "https://api.groq.com/openai/v1/chat/completions"
             headers_chat = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -110,10 +115,19 @@ def process_video():
         with open(txt_filepath, 'w', encoding='utf-8') as f:
             f.write(final_transcript)
 
-        # ၄။ Text-to-Speech အသံပြောင်းခြင်း
-        lang_code = 'my' if language == 'Myanmar' else 'en'
-        tts = gTTS(text=final_transcript, lang=lang_code)
-        tts.save(voice_filepath)
+        # အသံရွေးချယ်မှုစနစ် (Microsoft Edge TTS Voices)
+        voice_mapping = {
+            "Myanmar": {"Nilar (Female)": "my-MM-NilarNeural", "Thiha (Male)": "my-MM-ThihaNeural"},
+            "English": {"Nilar (Female)": "en-US-AriaNeural", "Thiha (Male)": "en-US-GuyNeural"},
+            "Japanese": {"Nilar (Female)": "ja-JP-NanamiNeural", "Thiha (Male)": "ja-JP-KeitaNeural"},
+            "Russian": {"Nilar (Female)": "ru-RU-SvetlanaNeural", "Thiha (Male)": "ru-RU-DmitryNeural"},
+            "Thai": {"Nilar (Female)": "th-TH-PremwadeeNeural", "Thiha (Male)": "th-TH-NiwatNeural"}
+        }
+        
+        selected_voice_model = voice_mapping.get(language, {}).get(voice_choice, "my-MM-NilarNeural")
+        
+        # Async ဖြင့် အသံဖိုင်ထုတ်ခြင်း
+        asyncio.run(generate_audio(final_transcript, selected_voice_model, voice_filepath))
 
         return jsonify({
             "message": "Success",
